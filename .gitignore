@@ -5,6 +5,6 @@
 *.pth
 *.png
 
-!saved_models/
-!test_data/test_images/
-!test_data/u2net_results/
+!saved_models/sample.pth
+!test_data/test_images/sample.png
+!test_data/u2net_results/sample_whitebg.png
