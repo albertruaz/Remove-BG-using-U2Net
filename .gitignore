@@ -5,3 +5,6 @@
 *.pth
 *.png
 
+!saved_models/
+!test_data/test_images/
+!test_data/u2net_results/
