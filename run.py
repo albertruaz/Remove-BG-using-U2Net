@@ -1,114 +1,201 @@
 import os
-from skimage import io, transform
 import torch
-import torchvision
-from torch.autograd import Variable
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms#, utils
-# import torch.optim as optim
-
 import numpy as np
 from PIL import Image
-import glob
+import requests
+from io import BytesIO
+from torch.autograd import Variable
+from torchvision import transforms
 
-from data_loader import RescaleT
-from data_loader import ToTensor
-from data_loader import ToTensorLab
-from data_loader import SalObjDataset
+from data_loader import RescaleT, ToTensorLab, SalObjDataset
+from u2net import U2NET
 
-from u2net import U2NET # full size version 173.6 MB
-from u2net import U2NETP # small version u2net 4.7 MB
-
-# normalize the predicted SOD probability map
-def normPRED(d):
-    ma = torch.max(d)
-    mi = torch.min(d)
-
-    dn = (d-mi)/(ma-mi)
-
-    return dn
-
-def save_output(image_name, pred, d_dir):
-    # 마스크
-    predict = pred.squeeze().cpu().data.numpy()
-    mask = (predict * 255).astype(np.uint8)
-
-    # 원본 이미지 불러오기 (RGB)
-    image = Image.open(image_name).convert("RGB")
-    image = np.array(image)
-
-    # 마스크 리사이즈 (원본 크기 맞춤)
-    mask = Image.fromarray(mask).resize((image.shape[1], image.shape[0]), resample=Image.BILINEAR)
-    mask = np.array(mask) / 255.0  # 0~1로 정규화
-
-    # 흰 배경
-    white_bg = np.ones_like(image, dtype=np.uint8) * 255
-
-    # 마스크 적용 (배경은 흰색, 전경은 원본)
-    result = image * mask[..., None] + white_bg * (1 - mask[..., None])
-    result = result.astype(np.uint8)
-
-    # 저장
-    img_name = os.path.basename(image_name)
-    name_no_ext = os.path.splitext(img_name)[0]
-    result_pil = Image.fromarray(result)
-    result_pil.save(os.path.join(d_dir, f"{name_no_ext}_whitebg.png"))
-
-
-def main():
-
-
-    image_dir = os.path.join(os.getcwd(), 'test_data', 'test_images')
-    prediction_dir = os.path.join(os.getcwd(), 'test_data', 'u2net' + '_results' + os.sep)
-    model_dir = os.path.join(os.getcwd(), 'saved_models', 'u2net.pth')
-    img_name_list = glob.glob(image_dir + os.sep + '*')
-    print(img_name_list)
-
-
-    test_salobj_dataset = SalObjDataset(img_name_list = img_name_list,
-                                        lbl_name_list = [],
-                                        transform=transforms.Compose([RescaleT(320),ToTensorLab(flag=0)])
-                                        )
-    test_salobj_dataloader = DataLoader(test_salobj_dataset,
-                                        batch_size=1,
-                                        shuffle=False,
-                                        num_workers=1)
-
-    net = U2NET(3,1)
-
-    if torch.cuda.is_available():
-        net.load_state_dict(torch.load(model_dir, weights_only=False))
-        net.cuda()
-    else:
-        net.load_state_dict(torch.load(model_dir, map_location='cpu', weights_only=False))
-    net.eval()
-
-    # --------- 4. inference for each image ---------
-    for i_test, data_test in enumerate(test_salobj_dataloader):
-
+class BackgroundRemover:
+    def __init__(self, model_path='saved_models/u2net.pth'):
+        """
+        Initialize U2-Net model for background removal
+        """
+        self.model_path = model_path
+        self.net = None
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self._load_model()
+    
+    def _load_model(self):
+        """Load U2-Net model"""
+        print("Loading U2NET model...")
+        self.net = U2NET(3, 1)
         
-        inputs_test = data_test['image']
-        inputs_test = inputs_test.type(torch.FloatTensor)
-
         if torch.cuda.is_available():
-            inputs_test = Variable(inputs_test.cuda())
+            self.net.load_state_dict(torch.load(self.model_path, weights_only=False))
+            self.net.cuda()
         else:
-            inputs_test = Variable(inputs_test)
+            self.net.load_state_dict(torch.load(self.model_path, map_location='cpu', weights_only=False))
+        
+        self.net.eval()
+        print("U2NET model loaded successfully")
+    
+    def _normPRED(self, d):
+        """Normalize prediction"""
+        ma = torch.max(d)
+        mi = torch.min(d)
+        dn = (d-mi)/(ma-mi)
+        return dn
+    
+    def _preprocess_image(self, image):
+        """Preprocess image for U2-Net"""
+        # Convert to RGB if needed
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        
+        # Convert to numpy array
+        image_np = np.array(image)
+        
+        # Create sample dict for data loader
+        sample = {
+            'imidx': np.array([0]),
+            'image': image_np,
+            'label': np.zeros_like(image_np[:,:,0:1])  # dummy label
+        }
+        
+        # Apply transforms
+        transform = transforms.Compose([RescaleT(320), ToTensorLab(flag=0)])
+        sample = transform(sample)
+        
+        # Add batch dimension
+        inputs = sample['image'].unsqueeze(0).type(torch.FloatTensor)
+        
+        if torch.cuda.is_available():
+            inputs = Variable(inputs.cuda())
+        else:
+            inputs = Variable(inputs)
+            
+        return inputs
+    
+    def remove_background_from_url(self, image_url):
+        """
+        Remove background from image URL and return PIL Image with white background
+        
+        Args:
+            image_url (str): URL of the image
+            
+        Returns:
+            PIL.Image: Image with white background
+        """
+        try:
+            # Download image from URL
+            response = requests.get(image_url, timeout=10)
+            response.raise_for_status()
+            image = Image.open(BytesIO(response.content))
+            
+            return self.remove_background_from_image(image)
+            
+        except Exception as e:
+            print(f"Error processing image from URL {image_url}: {str(e)}")
+            return None
+    
+    def remove_background_from_image(self, image):
+        """
+        Remove background from PIL Image and return image with white background
+        
+        Args:
+            image (PIL.Image): Input image
+            
+        Returns:
+            PIL.Image: Image with white background
+        """
+        try:
+            original_size = image.size
+            
+            # Preprocess image
+            inputs = self._preprocess_image(image)
+            
+            # Run inference
+            with torch.no_grad():
+                d1, d2, d3, d4, d5, d6, d7 = self.net(inputs)
+            
+            # Get prediction and normalize
+            pred = d1[:, 0, :, :]
+            pred = self._normPRED(pred)
+            
+            # Convert to numpy
+            predict = pred.squeeze().cpu().data.numpy()
+            mask = (predict * 255).astype(np.uint8)
+            
+            # Convert original image to RGB numpy array
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
+            image_np = np.array(image)
+            
+            # Resize mask to match original image size
+            mask_pil = Image.fromarray(mask).resize(original_size, resample=Image.BILINEAR)
+            mask_np = np.array(mask_pil) / 255.0  # Normalize to 0-1
+            
+            # Create white background
+            white_bg = np.ones_like(image_np, dtype=np.uint8) * 255
+            
+            # Apply mask (foreground keeps original, background becomes white)
+            result = image_np * mask_np[..., None] + white_bg * (1 - mask_np[..., None])
+            result = result.astype(np.uint8)
+            
+            # Convert back to PIL Image
+            result_pil = Image.fromarray(result)
+            
+            # Clean up GPU memory
+            del d1, d2, d3, d4, d5, d6, d7, inputs, pred
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            return result_pil
+            
+        except Exception as e:
+            print(f"Error removing background: {str(e)}")
+            return None
 
-        d1,d2,d3,d4,d5,d6,d7= net(inputs_test)
+def remove_background_batch(product_datas):
+    """
+    Remove background from batch of product images
+    
+    Args:
+        product_datas: List of tuples [(product_id, image_url), ...]
+        
+    Returns:
+        List of tuples [(product_id, processed_image), ...]
+        processed_image is PIL.Image with white background
+    """
+    remover = BackgroundRemover()
+    results = []
+    
+    for product_id, image_url in product_datas:
+        print(f"Processing product {product_id}...")
+        processed_image = remover.remove_background_from_url(image_url)
+        
+        if processed_image is not None:
+            results.append((product_id, processed_image))
+        else:
+            print(f"Failed to process product {product_id}")
+    
+    return results
 
-        # normalization
-        pred = d1[:,0,:,:]
-        pred = normPRED(pred)
-
-        # save results to test_results folder
-        if not os.path.exists(prediction_dir):
-            os.makedirs(prediction_dir, exist_ok=True)
-        save_output(img_name_list[i_test],pred,prediction_dir)
-
-        del d1,d2,d3,d4,d5,d6,d7
+# For standalone testing
+def main():
+    """Test function"""
+    # Test with sample data
+    test_image_path = "test_data/test_images"
+    if os.path.exists(test_image_path):
+        import glob
+        
+        remover = BackgroundRemover()
+        image_files = glob.glob(os.path.join(test_image_path, "*"))
+        
+        for img_path in image_files[:1]:  # Test with first image
+            print(f"Testing with {img_path}")
+            image = Image.open(img_path)
+            result = remover.remove_background_from_image(image)
+            
+            if result:
+                output_path = f"test_output_{os.path.basename(img_path)}"
+                result.save(output_path)
+                print(f"Result saved to {output_path}")
 
 if __name__ == "__main__":
-    main()
+    main() 
