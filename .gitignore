@@ -1,0 +1,6 @@
+
+.DS_Store
+saved_models/
+test_data/
+
+**/__pycache__/
