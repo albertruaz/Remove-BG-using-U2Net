@@ -71,15 +71,16 @@ class BackgroundRemover:
             
         return inputs
     
-    def remove_background_from_url(self, image_url):
+    def remove_background_from_url(self, image_url, background_color=(255, 255, 255)):
         """
-        Remove background from image URL and return PIL Image with white background
+        Remove background from image URL and return PIL Image with the chosen background
         
         Args:
             image_url (str): URL of the image
+            background_color (Tuple[int, int, int]): RGB background color
             
         Returns:
-            PIL.Image: Image with white background
+            PIL.Image: Image with the requested background color
         """
         try:
             # Download image from URL
@@ -87,21 +88,22 @@ class BackgroundRemover:
             response.raise_for_status()
             image = Image.open(BytesIO(response.content))
             
-            return self.remove_background_from_image(image)
+            return self.remove_background_from_image(image, background_color=background_color)
             
         except Exception as e:
             print(f"Error processing image from URL {image_url}: {str(e)}")
             return None
     
-    def remove_background_from_image(self, image):
+    def remove_background_from_image(self, image, background_color=(255, 255, 255)):
         """
-        Remove background from PIL Image and return image with white background
+        Remove background from PIL Image and return image with the chosen background
         
         Args:
             image (PIL.Image): Input image
+            background_color (Tuple[int, int, int]): RGB background color
             
         Returns:
-            PIL.Image: Image with white background
+            PIL.Image: Image with the requested background color
         """
         try:
             original_size = image.size
@@ -124,18 +126,21 @@ class BackgroundRemover:
             # Convert original image to RGB numpy array
             if image.mode != 'RGB':
                 image = image.convert('RGB')
-            image_np = np.array(image)
+            image_np = np.array(image, dtype=np.float32)
             
             # Resize mask to match original image size
             mask_pil = Image.fromarray(mask).resize(original_size, resample=Image.BILINEAR)
             mask_np = np.array(mask_pil) / 255.0  # Normalize to 0-1
             
-            # Create white background
-            white_bg = np.ones_like(image_np, dtype=np.uint8) * 255
+            # Create colored background
+            background_np = np.empty_like(image_np, dtype=np.float32)
+            background_np[:, :, 0] = background_color[0]
+            background_np[:, :, 1] = background_color[1]
+            background_np[:, :, 2] = background_color[2]
             
-            # Apply mask (foreground keeps original, background becomes white)
-            result = image_np * mask_np[..., None] + white_bg * (1 - mask_np[..., None])
-            result = result.astype(np.uint8)
+            # Apply mask (foreground keeps original, background uses selected color)
+            result = image_np * mask_np[..., None] + background_np * (1 - mask_np[..., None])
+            result = np.clip(result, 0, 255).astype(np.uint8)
             
             # Convert back to PIL Image
             result_pil = Image.fromarray(result)
@@ -160,7 +165,7 @@ def remove_background_batch(product_datas):
         
     Returns:
         List of tuples [(product_id, processed_image), ...]
-        processed_image is PIL.Image with white background
+        processed_image is PIL.Image with the default background color
     """
     remover = BackgroundRemover()
     results = []
@@ -178,24 +183,45 @@ def remove_background_batch(product_datas):
 
 # For standalone testing
 def main():
-    """Test function"""
-    # Test with sample data
-    test_image_path = "test_data/test_images"
-    if os.path.exists(test_image_path):
-        import glob
-        
-        remover = BackgroundRemover()
-        image_files = glob.glob(os.path.join(test_image_path, "*"))
-        
-        for img_path in image_files[:1]:  # Test with first image
-            print(f"Testing with {img_path}")
-            image = Image.open(img_path)
-            result = remover.remove_background_from_image(image)
-            
-            if result:
-                output_path = f"test_output_{os.path.basename(img_path)}"
-                result.save(output_path)
-                print(f"Result saved to {output_path}")
+    """Process all images in test_images and write results to u2net_results."""
+    test_image_dir = os.path.join("test_data", "test_images_white_bg")
+    output_dir = os.path.join("test_data", "u2net_results")
+    use_black_background = True  # Set False to revert to white background
+    background_color = (0, 0, 0) if use_black_background else (255, 255, 255)
+
+    if not os.path.isdir(test_image_dir):
+        print(f"Test image directory not found: {test_image_dir}")
+        return
+
+    import glob
+
+    image_files = sorted(glob.glob(os.path.join(test_image_dir, "*")))
+    if not image_files:
+        print("No images to process.")
+        return
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    remover = BackgroundRemover()
+
+    for img_path in image_files:
+        print(f"Processing: {img_path}")
+        try:
+            with Image.open(img_path) as image:
+                result = remover.remove_background_from_image(image, background_color=background_color)
+        except Exception as exc:
+            print(f"Failed to load image: {img_path} -> {exc}")
+            continue
+
+        if result is None:
+            print(f"Background removal failed: {img_path}")
+            continue
+
+        base_name = os.path.splitext(os.path.basename(img_path))[0]
+        suffix = "blackbg" if use_black_background else "whitebg"
+        output_path = os.path.join(output_dir, f"{base_name}_{suffix}.png")
+        result.save(output_path)
+        print(f"Saved result to {output_path}")
 
 if __name__ == "__main__":
     main() 

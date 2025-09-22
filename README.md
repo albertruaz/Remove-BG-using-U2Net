@@ -9,7 +9,7 @@ A simplified version of [U2-Net](https://github.com/xuebinqin/U-2-Net) for backg
 ```bash
 conda create -n remove-bg python=3.8
 conda activate remove-bg
-pip install -r setting/requirements_minimal.txt
+pip install -r requirements.txt
 ```
 
 ## How to Run
